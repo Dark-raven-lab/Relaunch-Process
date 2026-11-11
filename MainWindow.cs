@@ -78,10 +78,8 @@ namespace Process_Auto_Relaunch
             }
             FileLog.ProcessName = ProcessName;
             textBoxProcessName.TextChanged += (s, e) => FileLog.ProcessName = ProcessName;
-            var assembly = typeof(MainWindow).Assembly;
-            string version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
-            string buildDate = assembly.GetCustomAttributes<AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "BuildDate")?.Value;
-            FileLog.Write($"Утилита запущена. Версия {version}, сборка от {buildDate}, x64: {Environment.Is64BitProcess}.");
+            string buildDate = typeof(MainWindow).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "BuildDate")?.Value;
+            FileLog.Write($"Утилита запущена. Версия {Updater.CurrentVersionText}, сборка от {buildDate}, x64: {Environment.Is64BitProcess}.");
             if (afterUpdate)
             {
                 FileLog.Write("Запуск после обновления по кнопке." + (afterUpdateNote != null ? $" Внимание: {afterUpdateNote}." : ""));
@@ -758,8 +756,9 @@ namespace Process_Auto_Relaunch
                 ReleaseInfo release = await Updater.GetLatestReleaseAsync();
                 if (release.Version <= current)
                 {
-                    Status($"Установлена последняя версия {current}.");
-                    MessageBox.Show(this, $"Установлена последняя версия {current}.", "Обновление",
+                    string upToDate = $"Установлена последняя версия {current}.";
+                    Status(upToDate);
+                    MessageBox.Show(this, upToDate, "Обновление",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }

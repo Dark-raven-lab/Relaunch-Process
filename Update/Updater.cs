@@ -45,21 +45,21 @@ namespace RelaunchProcess.Update
         private static readonly TimeSpan oldProcessExitTimeout = TimeSpan.FromSeconds(30);
         private static readonly HttpClient http = CreateHttpClient();
 
-        public static string AppDirectory => FileLog.BaseDirectory;
-        public static string UpdatesDirectory => Path.Combine(AppDirectory, "Updates");
         private static string ExePath => typeof(Updater).Assembly.Location;
+        private static string AppDirectory => Path.GetDirectoryName(ExePath);
+        private static string UpdatesDirectory => Path.Combine(AppDirectory, "Updates");
 
         /// <summary>
-        /// Версия утилиты из AssemblyInformationalVersion (вида 1.7.2).
+        /// Версия утилиты как есть из AssemblyInformationalVersion (вида 1.7.2).
         /// </summary>
-        public static Version CurrentVersion
-        {
-            get
-            {
-                string text = typeof(Updater).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
-                return Version.TryParse(text, out Version version) ? version : new Version(0, 0, 0);
-            }
-        }
+        public static string CurrentVersionText =>
+            typeof(Updater).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+
+        /// <summary>
+        /// Та же версия для сравнения с релизом; 0.0.0, если не разбирается.
+        /// </summary>
+        public static Version CurrentVersion =>
+            Version.TryParse(CurrentVersionText, out Version version) ? version : new Version(0, 0, 0);
 
         private static HttpClient CreateHttpClient()
         {
@@ -142,19 +142,20 @@ namespace RelaunchProcess.Update
             string filesDirectory = Path.Combine(directory, "files");
             Directory.CreateDirectory(filesDirectory);
 
-            byte[] zipBytes = await http.GetByteArrayAsync(release.ZipUrl).ConfigureAwait(false);
+            // Маленький .sha256 сначала: если он недоступен, архив не скачиваем
             string shaText = await http.GetStringAsync(release.ShaUrl).ConfigureAwait(false);
+            byte[] zipBytes = await http.GetByteArrayAsync(release.ZipUrl).ConfigureAwait(false);
             File.WriteAllBytes(zipPath, zipBytes);
 
-            string expected = shaText.Trim().Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
+            string expected = shaText.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
             string actual;
             using (var sha256 = SHA256.Create())
             {
-                actual = BitConverter.ToString(sha256.ComputeHash(zipBytes)).Replace("-", "");
+                actual = BitConverter.ToString(sha256.ComputeHash(zipBytes)).Replace("-", "").ToLowerInvariant();
             }
             if (!actual.Equals(expected, StringComparison.OrdinalIgnoreCase))
             {
-                throw new InvalidOperationException($"SHA-256 архива не совпадает: ожидался {expected}, получен {actual.ToLowerInvariant()}");
+                throw new InvalidOperationException($"SHA-256 архива не совпадает: ожидался {expected}, получен {actual}");
             }
 
             ExtractTopLevelFiles(zipPath, filesDirectory);
@@ -174,8 +175,9 @@ namespace RelaunchProcess.Update
                 foreach (ZipArchiveEntry entry in archive.Entries)
                 {
                     string name = entry.FullName;
-                    if (name.Length == 0 || name.IndexOfAny(new[] { '/', '\\' }) >= 0 || name.Contains("..")
-                        || name.IndexOfAny(invalid) >= 0 || name.EndsWith(OldSuffix, StringComparison.OrdinalIgnoreCase))
+                    // GetInvalidFileNameChars включает '/' и '\', так что записи в папках отсекаются здесь же
+                    if (name.Length == 0 || name.IndexOfAny(invalid) >= 0 || name.Contains("..")
+                        || name.EndsWith(OldSuffix, StringComparison.OrdinalIgnoreCase))
                     {
                         throw new InvalidOperationException($"в архиве недопустимая запись \"{name}\", ожидаются только файлы без папок");
                     }
@@ -241,7 +243,6 @@ namespace RelaunchProcess.Update
                 throw new InvalidOperationException($"не удалось заменить файлы: {ex.Message}{Rollback(replaced)}", ex);
             }
 
-            string failure;
             int oldPid = Process.GetCurrentProcess().Id;
             using (var confirmed = new EventWaitHandle(false, EventResetMode.ManualReset, EventName(oldPid)))
             {
@@ -263,15 +264,15 @@ namespace RelaunchProcess.Update
 
                 using (newProcess)
                 {
-                    failure = await Task.Run(() => WaitForConfirmation(confirmed, newProcess)).ConfigureAwait(false);
+                    string failure = await Task.Run(() => WaitForConfirmation(confirmed, newProcess)).ConfigureAwait(false);
                     if (failure == null)
                     {
                         return;
                     }
                     StopProcess(newProcess);
+                    throw new InvalidOperationException(failure + Rollback(replaced));
                 }
             }
-            throw new InvalidOperationException(failure + Rollback(replaced));
         }
 
         private static string WaitForConfirmation(EventWaitHandle confirmed, Process newProcess)

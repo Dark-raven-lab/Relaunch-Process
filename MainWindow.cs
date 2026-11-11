@@ -39,6 +39,11 @@ namespace Process_Auto_Relaunch
         private Stopwatch cpuMeasureTimer;
         private System.Timers.Timer waitResponceTimer;
 
+        // Слежение за кодом выхода. TrackExit вызывается и из цикла наблюдения, и из таймера зависания, поэтому под блокировкой.
+        private readonly object exitTrackLock = new object();
+        private Process exitTrackedProcess;     // процесс с открытым хендлом: без него код выхода после завершения не прочитать
+        private int exitTrackFailedPid;         // PID, хендл которого открыть не удалось: повторно не пытаемся
+
         /// <summary>
         /// Процесс для наблюдения
         /// </summary>
@@ -282,11 +287,78 @@ namespace Process_Auto_Relaunch
                 if (process.SessionId == sessionid)
                 {
                     WatchedProcess = process;
+                    TrackExit(process);
                     return true;
                 }
             }
             Debug.WriteLine($"Process {name} for current session id {sessionid} not found");
             return false;
+        }
+
+        /// <summary>
+        /// Начинает следить за завершением процесса. Хендл открывается, пока процесс жив,
+        /// иначе после выхода код завершения уже не прочитать.
+        /// </summary>
+        private void TrackExit(Process process)
+        {
+            string error;
+            lock (exitTrackLock)
+            {
+                if (exitTrackedProcess != null || process.Id == exitTrackFailedPid)
+                {
+                    return;
+                }
+                try
+                {
+                    _ = process.Handle;
+                    exitTrackedProcess = process;
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    exitTrackFailedPid = process.Id;
+                    error = ex.Message;
+                }
+            }
+            // Status ждёт поток интерфейса, поэтому вызываем его уже без блокировки
+            Status($"Не удалось открыть процесс {ProcessName} (PID {process.Id}), код выхода не будет известен: {error}", NotifyLevel.logHistory | NotifyLevel.logDiscord);
+        }
+
+        /// <summary>
+        /// Если отслеживаемый процесс завершился, сообщает его код выхода и прекращает слежение.
+        /// -1 (0xFFFFFFFF) - процесс снят через Kill/TerminateProcess (так же завершается сам Torch при рестарте);
+        /// 0xC0000xxx - аварийное завершение (код NTSTATUS); иное - ExitProcess/Environment.Exit с этим кодом.
+        /// </summary>
+        private void ReportTrackedExit()
+        {
+            Process process;
+            lock (exitTrackLock)
+            {
+                process = exitTrackedProcess;
+                if (process == null || !process.HasExited)
+                {
+                    return;
+                }
+                exitTrackedProcess = null;
+            }
+
+            // ExitTime ненадёжен (бывает нулевым), поэтому пишем время обнаружения: цикл проверяет раз в секунду.
+            // Исключение здесь остановило бы весь цикл наблюдения, поэтому оно перехватывается.
+            string codeText;
+            try
+            {
+                int code = process.ExitCode;
+                codeText = $"с кодом {code} (0x{code:X8})";
+            }
+            catch (Exception ex)
+            {
+                codeText = $"(код выхода прочитать не удалось: {ex.Message})";
+            }
+            Status($"Процесс {ProcessName} (PID {process.Id}) завершился {codeText}, обнаружено в {DateTime.Now:HH:mm:ss}.", NotifyLevel.logHistory | NotifyLevel.logDiscord);
+            if (!ReferenceEquals(process, WatchedProcess))
+            {
+                process.Dispose();
+            }
         }
 
         /// <summary>
@@ -417,6 +489,7 @@ namespace Process_Auto_Relaunch
 
             while (!worker.CancellationPending)
             {
+                ReportTrackedExit();
                 if (ProcessByNameIsRuning(textBoxProcessName.Text))
                 {
                     double cpuTotalTime, cpuPercent;

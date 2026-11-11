@@ -1,20 +1,16 @@
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
-using System.Security.Principal;
+using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Windows.Forms;
 using RelaunchProcess.Properties;
-using static System.Windows.Forms.VisualStyles.VisualStyleElement;
 using Discord;
 using Discord.Webhook;
-using System.Data;
-using static System.Net.Mime.MediaTypeNames;
 using RelaunchProcess;
+using RelaunchProcess.Diagnostics;
 using System.Timers;
-using System.Threading.Tasks;
-using System.Runtime.CompilerServices;
 using System.Configuration;
 
 namespace Process_Auto_Relaunch
@@ -44,6 +40,12 @@ namespace Process_Auto_Relaunch
         private Process exitTrackedProcess;     // процесс с открытым хендлом: без него код выхода после завершения не прочитать
         private int exitTrackFailedPid;         // PID, хендл которого открыть не удалось: повторно не пытаемся
 
+        private const int MaxHistoryLines = 100;   // строк в окне истории; файл лога не ограничен
+        private int cpuLastPid;                    // PID, для которого накоплен cpuLastTime
+        private string lastLoopError;              // последняя ошибка цикла наблюдения, чтобы не слать одно и то же каждую секунду
+        private DateTime lastLoopErrorReported;    // когда она последний раз ушла в историю и Discord (UTC)
+        private static readonly TimeSpan LoopErrorRepeatInterval = TimeSpan.FromMinutes(10);
+
         /// <summary>
         /// Процесс для наблюдения
         /// </summary>
@@ -70,6 +72,12 @@ namespace Process_Auto_Relaunch
                     Settings.Default.Save();
                 }
             }
+            FileLog.ProcessName = ProcessName;
+            textBoxProcessName.TextChanged += (s, e) => FileLog.ProcessName = ProcessName;
+            var assembly = typeof(MainWindow).Assembly;
+            string version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            string buildDate = assembly.GetCustomAttributes<AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "BuildDate")?.Value;
+            FileLog.Write($"Утилита запущена. Версия {version}, сборка от {buildDate}, x64: {Environment.Is64BitProcess}.");
             this.updateLogDelegate = this.UpdateStatus;
             this.updateLogDelegate += this.SendDiscordMessage;
             this.updateLogDelegate += this.HistoryLog;
@@ -183,7 +191,34 @@ namespace Process_Auto_Relaunch
         private void HistoryLog(string text, NotifyLevel level)
         {
             if (!level.HasFlag(NotifyLevel.logAlways) && !level.HasFlag(NotifyLevel.logHistory)) return;
-            richTextBoxHistory.Text += DateTime.Now.ToString() + ": " + text + "\n";
+            richTextBoxHistory.AppendText(DateTime.Now.ToString() + ": " + text + "\n");
+            TrimHistory();
+        }
+
+        /// <summary>
+        /// Оставляет в окне истории последние MaxHistoryLines строк (из файла лога ничего не удаляется)
+        /// </summary>
+        private void TrimHistory()
+        {
+            // Считаем логические строки по '\n': GetLineFromCharIndex при переносе слов считал бы экранные
+            string text = richTextBoxHistory.Text;
+            int lines = text.Count(c => c == '\n');
+            if (lines > MaxHistoryLines)
+            {
+                int cut = 0;
+                for (int removed = 0; removed < lines - MaxHistoryLines; removed++)
+                {
+                    cut = text.IndexOf('\n', cut) + 1;
+                }
+                // SelectedText на ReadOnly-поле может не сработать, поэтому снимаем защиту на время удаления
+                bool readOnly = richTextBoxHistory.ReadOnly;
+                richTextBoxHistory.ReadOnly = false;
+                richTextBoxHistory.Select(0, cut);
+                richTextBoxHistory.SelectedText = "";
+                richTextBoxHistory.ReadOnly = readOnly;
+            }
+            richTextBoxHistory.SelectionStart = richTextBoxHistory.TextLength;
+            richTextBoxHistory.ScrollToCaret();
         }
 
         /// <summary>
@@ -219,9 +254,23 @@ namespace Process_Auto_Relaunch
         /// </summary>
         /// <param name="text">Текст для отображения/отправки </param>
         /// <param name="level">Флаги для назначения отправки</param>
-        public void Status(string text, NotifyLevel level = NotifyLevel.logUpdateStatus)
+        /// <param name="detail">Исключение, полный текст которого пишется только в файл лога</param>
+        public void Status(string text, NotifyLevel level = NotifyLevel.logUpdateStatus, Exception detail = null)
         {
-            Invoke(updateLogDelegate, text, level);
+            // Файл лога пишем здесь, до Invoke и независимо от него: запись не потеряется,
+            // даже если форма закрывается или упал один из обработчиков интерфейса
+            if ((level & (NotifyLevel.logAlways | NotifyLevel.logHistory | NotifyLevel.logDiscord)) != 0)
+            {
+                FileLog.Write(detail == null ? text : text + Environment.NewLine + detail);
+            }
+            try
+            {
+                Invoke(updateLogDelegate, text, level);
+            }
+            catch (Exception ex)
+            {
+                FileLog.Write($"Не удалось показать сообщение: {ex.Message}");
+            }
         }
 
         private void CheckProgramState()
@@ -238,6 +287,8 @@ namespace Process_Auto_Relaunch
             settingsToolStripMenuItem.Enabled = !watching;
 
             Settings.Default.enableWatching = watching;
+            // Сохраняем сразу: если утилиту убьют, при следующем запуске восстановится актуальное состояние
+            Settings.Default.Save();
         }
 
         /// <summary>
@@ -281,15 +332,25 @@ namespace Process_Auto_Relaunch
         {
             var sessionid = Process.GetCurrentProcess().SessionId;
             var processes = Process.GetProcessesByName(name);
+            Process found = null;
             foreach (var process in processes)
             {
                 Debug.WriteLine($"Found proces: {process.ProcessName}. Session Id: {process.SessionId}. Current Session Id: {sessionid}");
-                if (process.SessionId == sessionid)
+                if (found == null && process.SessionId == sessionid)
                 {
-                    WatchedProcess = process;
-                    TrackExit(process);
-                    return true;
+                    found = process;
                 }
+                else
+                {
+                    // лишние объекты освобождаем сразу, не дожидаясь сборщика мусора
+                    process.Dispose();
+                }
+            }
+            if (found != null)
+            {
+                WatchedProcess = found;
+                TrackExit(found);
+                return true;
             }
             Debug.WriteLine($"Process {name} for current session id {sessionid} not found");
             return false;
@@ -425,6 +486,19 @@ namespace Process_Auto_Relaunch
         /// </summary>
         private void ProcessNotResponding(Object source, ElapsedEventArgs e)
         {
+            // System.Timers.Timer молча глотает исключения из Elapsed, поэтому ловим и пишем сами
+            try
+            {
+                HandleNotResponding();
+            }
+            catch (Exception ex)
+            {
+                Status($"Ошибка обработки зависшего процесса: {ex.Message}", NotifyLevel.logHistory | NotifyLevel.logDiscord, ex);
+            }
+        }
+
+        private void HandleNotResponding()
+        {
             Debug.WriteLine("Таймер ожидания ответа процесса вышел.");
             Status($"Процесс {ProcessName} не отвечает уже какое-то время, возможно завис!", NotifyLevel.logHistory | NotifyLevel.logDiscord);
 
@@ -437,22 +511,48 @@ namespace Process_Auto_Relaunch
 
             // Пытаемся самостоятельно завершить процесс
             // ! Обнаружение зависшего процесса может быть некорректным !
-            if (ProcessByNameIsRuning(textBoxProcessName.Text))
+            if (ProcessByNameIsRuning(ProcessName))
             {
-                ProcessKill(WatchedProcess);
+                // Локальная копия: цикл наблюдения переприсваивает WatchedProcess каждую секунду
+                Process target = WatchedProcess;
+                CaptureDump(target);
+                ProcessKill(target);
             }
+        }
+
+        /// <summary>
+        /// Снимает облегчённый дамп и managed-стеки перед завершением процесса.
+        /// Неудача не мешает завершению: ошибка только записывается.
+        /// </summary>
+        private void CaptureDump(Process process)
+        {
+            if (process == null || process.HasExited)
+            {
+                return;
+            }
+            Status($"Снимаю дамп процесса {ProcessName} (PID {process.Id})...", NotifyLevel.logHistory);
+            Stopwatch timer = Stopwatch.StartNew();
+            DumpResult dump = ProcessDumper.Capture(process, ProcessName);
+            string dumpText = dump.DumpPath ?? $"не снят ({dump.DumpError})";
+            string stacksText = dump.StacksPath ?? $"не сняты ({dump.StacksError})";
+            Status($"Дамп: {dumpText}. Стеки: {stacksText}. Заняло {timer.Elapsed.TotalSeconds:f1} с.", NotifyLevel.logHistory | NotifyLevel.logDiscord);
         }
 
         private void ProcessStart(string path, string args)
         {
-            if (ProcessByNameIsRuning(path))
+            if (ProcessByNameIsRuning(ProcessName))
             {
                 return;
             }
 
             // Процесс не запущен
             WatchedProcess = Process.Start(path, args);
-            cpuLastTime = 0;
+            if (WatchedProcess != null)
+            {
+                // Хендл сразу: если процесс упадёт до следующей проверки, код выхода не потеряется
+                TrackExit(WatchedProcess);
+            }
+            // cpuLastTime сбрасывается в WatchIteration по смене PID
             cpuMeasureTimer.Start();
             Status($"Процесс {ProcessName} запущен.", NotifyLevel.logAlways);
         }
@@ -489,51 +589,14 @@ namespace Process_Auto_Relaunch
 
             while (!worker.CancellationPending)
             {
-                ReportTrackedExit();
-                if (ProcessByNameIsRuning(textBoxProcessName.Text))
+                // Ошибка одной итерации не должна останавливать наблюдение: пишем её и продолжаем
+                try
                 {
-                    double cpuTotalTime, cpuPercent;
-                    string ProcessAnswer;
-
-                    cpuMeasureTimer.Stop();
-                    try
-                    {
-                        cpuTotalTime = WatchedProcess.TotalProcessorTime.TotalMilliseconds - cpuLastTime;
-                        cpuLastTime = WatchedProcess.TotalProcessorTime.TotalMilliseconds;
-                        cpuPercent = cpuTotalTime * 100 / (Environment.ProcessorCount * cpuMeasureTimer.ElapsedMilliseconds);
-                        ProcessAnswer = (WatchedProcess.Responding) ? "Активен" : "Неактивен";
-                        ProcessCheckResponding(WatchedProcess.Responding, cpuPercent);
-                    }
-                    catch
-                    {
-                        cpuTotalTime = 0;
-                        cpuPercent = 0;
-                        ProcessAnswer = "Неактивен";
-                    }
-                    cpuMeasureTimer.Reset();
-                    cpuMeasureTimer.Start();
-
-                    Status($"Процесс {ProcessName} уже запущен.", NotifyLevel.logUpdateStatus);
-                    processInformationLabel.Text = $"Интерфейс: {ProcessAnswer}. ЦПУ: {cpuPercent:f2}% {cpuTotalTime:f2}мсек";
-                    if (i < (int)numericUpDown1.Value) SendDiscordMessage($"Процесс {ProcessName} запущен.", NotifyLevel.logDiscord);
-                    i = (int)numericUpDown1.Value;
+                    WatchIteration(ref i);
                 }
-                else
+                catch (Exception ex)
                 {
-                    processInformationLabel.Text = "";
-                    if (radioButtonRestartTimer.Checked)
-                    {
-                        if (i == (int)numericUpDown1.Value) Status($"Процесс {ProcessName} не найден. Запуск через {i} сек", NotifyLevel.logDiscord);
-                        i--;
-                        Status($"Процесс {ProcessName} не найден. Запуск через {i}", NotifyLevel.logUpdateStatus);
-                    }
-
-                    if (i <= 0 || radioButtonRestartNow.Checked)
-                    {
-                        i = (int)numericUpDown1.Value;
-                        Status($"Запускаем {ProcessName}", NotifyLevel.logUpdateStatus | NotifyLevel.logDiscord);
-                        ProcessStart(Settings.Default.startProgramPath, textBoxArguments.Text);
-                    }
+                    ReportLoopError(ex);
                 }
 
                 Thread.Sleep(1000);
@@ -543,6 +606,85 @@ namespace Process_Auto_Relaunch
             {
                 e.Cancel = true;
                 processInformationLabel.Text = "";
+            }
+        }
+
+        /// <summary>
+        /// Пишет ошибку цикла наблюдения: стек всегда в файл, в историю и Discord - новая ошибка
+        /// или та же, но не чаще раза в LoopErrorRepeatInterval
+        /// </summary>
+        private void ReportLoopError(Exception ex)
+        {
+            string key = ex.GetType().FullName + ": " + ex.Message;
+            DateTime now = DateTime.UtcNow;
+            if (key == lastLoopError && now - lastLoopErrorReported < LoopErrorRepeatInterval)
+            {
+                FileLog.Write($"Ошибка в цикле наблюдения (повтор): {ex}");
+                return;
+            }
+            lastLoopError = key;
+            lastLoopErrorReported = now;
+            Status($"Ошибка в цикле наблюдения: {ex.Message}. Наблюдение продолжается.", NotifyLevel.logHistory | NotifyLevel.logDiscord, ex);
+        }
+
+        /// <summary>
+        /// Одна проверка процесса (раз в секунду)
+        /// </summary>
+        /// <param name="i">Обратный отсчёт до перезапуска, сек</param>
+        private void WatchIteration(ref int i)
+        {
+            ReportTrackedExit();
+            if (ProcessByNameIsRuning(ProcessName))
+            {
+                double cpuTotalTime, cpuPercent;
+                string ProcessAnswer;
+
+                // Сменился PID (перезапуск не нами): старое накопленное время ЦП к новому процессу не относится
+                if (WatchedProcess.Id != cpuLastPid)
+                {
+                    cpuLastPid = WatchedProcess.Id;
+                    cpuLastTime = 0;
+                }
+
+                cpuMeasureTimer.Stop();
+                try
+                {
+                    cpuTotalTime = WatchedProcess.TotalProcessorTime.TotalMilliseconds - cpuLastTime;
+                    cpuLastTime = WatchedProcess.TotalProcessorTime.TotalMilliseconds;
+                    cpuPercent = cpuTotalTime * 100 / (Environment.ProcessorCount * cpuMeasureTimer.ElapsedMilliseconds);
+                    ProcessAnswer = (WatchedProcess.Responding) ? "Активен" : "Неактивен";
+                    ProcessCheckResponding(WatchedProcess.Responding, cpuPercent);
+                }
+                catch
+                {
+                    cpuTotalTime = 0;
+                    cpuPercent = 0;
+                    ProcessAnswer = "Неактивен";
+                }
+                cpuMeasureTimer.Reset();
+                cpuMeasureTimer.Start();
+
+                Status($"Процесс {ProcessName} уже запущен.", NotifyLevel.logUpdateStatus);
+                processInformationLabel.Text = $"Интерфейс: {ProcessAnswer}. ЦПУ: {cpuPercent:f2}% {cpuTotalTime:f2}мсек";
+                if (i < (int)numericUpDown1.Value) Status($"Процесс {ProcessName} запущен.", NotifyLevel.logDiscord);
+                i = (int)numericUpDown1.Value;
+            }
+            else
+            {
+                processInformationLabel.Text = "";
+                if (radioButtonRestartTimer.Checked)
+                {
+                    if (i == (int)numericUpDown1.Value) Status($"Процесс {ProcessName} не найден. Запуск через {i} сек", NotifyLevel.logDiscord);
+                    i--;
+                    Status($"Процесс {ProcessName} не найден. Запуск через {i}", NotifyLevel.logUpdateStatus);
+                }
+
+                if (i <= 0 || radioButtonRestartNow.Checked)
+                {
+                    i = (int)numericUpDown1.Value;
+                    Status($"Запускаем {ProcessName}", NotifyLevel.logUpdateStatus | NotifyLevel.logDiscord);
+                    ProcessStart(Settings.Default.startProgramPath, textBoxArguments.Text);
+                }
             }
         }
 

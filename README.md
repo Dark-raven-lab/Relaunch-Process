@@ -23,8 +23,13 @@
 ## Выпуск релиза
 
 Релизы собираются автоматически через GitHub Actions ([.github/workflows/release.yml](.github/workflows/release.yml)).
-Push тега вида `vX.Y.Z` запускает сборку конфигурации Release x64 и публикует архив
-`Relaunch-Process-vX.Y.Z-x64.zip` на странице [Releases](../../releases).
+Версия задаётся только в `Properties/AssemblyInfo.cs`, тег вручную ставить не нужно.
+
+При каждом push в `master` workflow читает `AssemblyInformationalVersion`:
+
+- если тега `v<версия>` на GitHub ещё нет, он собирает конфигурацию Release x64, создаёт тег
+  на этом коммите и публикует архив `Relaunch-Process-vX.Y.Z-x64.zip` на странице [Releases](../../releases);
+- если такой тег уже есть (версию не поднимали), сборка пропускается.
 
 Порядок выпуска:
 
@@ -35,24 +40,24 @@ Push тега вида `vX.Y.Z` запускает сборку конфигур
    ```
    git push origin master
    ```
-3. Поставьте тег с той же версией и отправьте его:
-   ```
-   git tag v1.7.2
-   git push origin v1.7.2
-   ```
-4. Ход сборки виден на вкладке Actions. Через 2–4 минуты релиз с архивом появится в Releases,
-   описание изменений составляется из коммитов автоматически.
+3. Ход сборки виден на вкладке Actions. Через 2–4 минуты релиз с архивом появится в Releases,
+   описание изменений составляется из коммитов автоматически. Чтобы получить новый тег локально,
+   выполните `git fetch --tags`.
 
 Важно:
 
-- Тег без `v` должен совпадать с `AssemblyInformationalVersion`. Если они различаются, сборка
-  останавливается с ошибкой и релиз не создаётся.
-- Workflow берётся из того коммита, на который указывает тег, поэтому тег ставится на коммит
-  из `master`, где уже есть `.github/workflows/release.yml`.
+- Любой push в `master` с новой версией сразу публикует релиз. Чтобы отправить изменения без релиза,
+  не поднимайте версию.
+- Все три версии должны начинаться одинаково: `AssemblyInformationalVersion` вида `X.Y.Z`,
+  `AssemblyVersion` и `AssemblyFileVersion` вида `X.Y.Z.N`. Иначе сборка останавливается с ошибкой
+  и релиз не создаётся.
+- Тег создаётся только после успешной сборки. Если сборка упала, исправьте ошибку и сделайте
+  новый push или запустите workflow вручную: Actions → Release → Run workflow.
 - В архив попадает всё содержимое `bin\x64\Release`, кроме `.pdb`. Утилите нужны все DLL из архива
   (ClrMD для стеков зависшего процесса, Newtonsoft.Json для Discord), копировать один exe нельзя.
-- Если релиз получился неправильным, удалите его вместе с тегом на GitHub (Releases → Delete,
-  затем `git push origin --delete vX.Y.Z` и `git tag -d vX.Y.Z`), исправьте и поставьте тег заново.
+- Если релиз получился неправильным, удалите его вместе с тегом (Releases → Delete, затем
+  `git push origin --delete vX.Y.Z` и `git tag -d vX.Y.Z`), исправьте и сделайте push
+  или запустите workflow вручную.
 
 Локальная сборка: `msbuild "Process Auto Relaunch.csproj" -restore -p:Configuration=Release -p:Platform=x64`.
 Post-build шаг кладёт zip в папку `bin`.

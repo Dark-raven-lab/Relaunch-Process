@@ -19,3 +19,40 @@
 3. При необходимости включите принудительное завершение зависшего процесса.
 4. Включите наблюдение — дальше программа работает в фоне.
 5. Для уведомлений настройте Discord webhook (URL, имя бота, аватар) в меню настроек.
+
+## Выпуск релиза
+
+Релизы собираются автоматически через GitHub Actions ([.github/workflows/release.yml](.github/workflows/release.yml)).
+Push тега вида `vX.Y.Z` запускает сборку конфигурации Release x64 и публикует архив
+`Relaunch-Process-vX.Y.Z-x64.zip` на странице [Releases](../../releases).
+
+Порядок выпуска:
+
+1. Поднимите версию в `Properties/AssemblyInfo.cs`:
+   - `AssemblyInformationalVersion` задаёт версию релиза, например `1.7.2`;
+   - `AssemblyVersion` и `AssemblyFileVersion` имеют вид `1.7.2.MMDD`, например `1.7.2.1112`.
+2. Закоммитьте изменения в `master` и отправьте ветку:
+   ```
+   git push origin master
+   ```
+3. Поставьте тег с той же версией и отправьте его:
+   ```
+   git tag v1.7.2
+   git push origin v1.7.2
+   ```
+4. Ход сборки виден на вкладке Actions. Через 2–4 минуты релиз с архивом появится в Releases,
+   описание изменений составляется из коммитов автоматически.
+
+Важно:
+
+- Тег без `v` должен совпадать с `AssemblyInformationalVersion`. Если они различаются, сборка
+  останавливается с ошибкой и релиз не создаётся.
+- Workflow берётся из того коммита, на который указывает тег, поэтому тег ставится на коммит
+  из `master`, где уже есть `.github/workflows/release.yml`.
+- В архив попадает всё содержимое `bin\x64\Release`, кроме `.pdb`. Утилите нужны все DLL из архива
+  (ClrMD для стеков зависшего процесса, Newtonsoft.Json для Discord), копировать один exe нельзя.
+- Если релиз получился неправильным, удалите его вместе с тегом на GitHub (Releases → Delete,
+  затем `git push origin --delete vX.Y.Z` и `git tag -d vX.Y.Z`), исправьте и поставьте тег заново.
+
+Локальная сборка: `msbuild "Process Auto Relaunch.csproj" -restore -p:Configuration=Release -p:Platform=x64`.
+Post-build шаг кладёт zip в папку `bin`.

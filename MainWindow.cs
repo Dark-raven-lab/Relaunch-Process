@@ -336,7 +336,9 @@ namespace Process_Auto_Relaunch
             foreach (var process in processes)
             {
                 Debug.WriteLine($"Found proces: {process.ProcessName}. Session Id: {process.SessionId}. Current Session Id: {sessionid}");
-                if (found == null && process.SessionId == sessionid)
+                // Завершённый процесс остаётся в списке, пока кто-то держит его хендл (в т.ч. мы сами ради кода выхода).
+                // У такого процесса нет потоков: считаем его не запущенным, иначе перезапуск не случится.
+                if (found == null && process.SessionId == sessionid && process.Threads.Count > 0)
                 {
                     found = process;
                 }
@@ -416,10 +418,9 @@ namespace Process_Auto_Relaunch
                 codeText = $"(код выхода прочитать не удалось: {ex.Message})";
             }
             Status($"Процесс {ProcessName} (PID {process.Id}) завершился {codeText}, обнаружено в {DateTime.Now:HH:mm:ss}.", NotifyLevel.logHistory | NotifyLevel.logDiscord);
-            if (!ReferenceEquals(process, WatchedProcess))
-            {
-                process.Dispose();
-            }
+            // Хендл закрываем сразу: пока он открыт, завершённый процесс виден в списке процессов
+            Interlocked.CompareExchange(ref WatchedProcess, null, process);
+            process.Dispose();
         }
 
         /// <summary>

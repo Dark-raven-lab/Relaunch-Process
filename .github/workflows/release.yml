@@ -60,11 +60,15 @@ jobs:
         run: |
           $files = Get-ChildItem bin/x64/Release/* -File -Exclude *.pdb
           if (-not ($files | Where-Object Name -eq 'Relaunch Process.exe')) { throw 'Relaunch Process.exe not found in bin/x64/Release' }
-          $files | Compress-Archive -DestinationPath "Relaunch-Process-${{ steps.version.outputs.tag }}-x64.zip"
+          $zip = "Relaunch-Process-${{ steps.version.outputs.tag }}-x64.zip"
+          $files | Compress-Archive -DestinationPath $zip
+          # Хеш для проверки архива при обновлении из утилиты
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("$PWD/$zip.sha256", "$hash  $zip`n")
 
       - name: Publish release
         if: steps.version.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
-        run: gh release create "$env:TAG" "Relaunch-Process-$env:TAG-x64.zip" --target "${{ github.sha }}" --title "$env:TAG" --generate-notes
+        run: gh release create "$env:TAG" "Relaunch-Process-$env:TAG-x64.zip" "Relaunch-Process-$env:TAG-x64.zip.sha256" --target "${{ github.sha }}" --title "$env:TAG" --generate-notes

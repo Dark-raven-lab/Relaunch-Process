@@ -60,6 +60,7 @@ namespace Process_Auto_Relaunch
             this.settingsToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.webhookSettingsMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.AboutProgram = new System.Windows.Forms.ToolStripMenuItem();
+            this.updateMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.tipProgramStartPath = new System.Windows.Forms.ToolTip(this.components);
             this.groupBoxActions.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)(this.numericUpDown1)).BeginInit();
@@ -389,6 +390,7 @@ namespace Process_Auto_Relaunch
             this.mainMenu.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(204)));
             this.mainMenu.Items.AddRange(new System.Windows.Forms.ToolStripItem[] {
             this.settingsToolStripMenuItem,
+            this.updateMenuItem,
             this.AboutProgram});
             this.mainMenu.Location = new System.Drawing.Point(0, 0);
             this.mainMenu.Name = "mainMenu";
@@ -417,6 +419,13 @@ namespace Process_Auto_Relaunch
             this.AboutProgram.Size = new System.Drawing.Size(104, 20);
             this.AboutProgram.Text = "О программе";
             this.AboutProgram.Click += new System.EventHandler(this.AboutProgram_Click);
+            //
+            // updateMenuItem
+            //
+            this.updateMenuItem.Name = "updateMenuItem";
+            this.updateMenuItem.Size = new System.Drawing.Size(92, 20);
+            this.updateMenuItem.Text = "Обновление";
+            this.updateMenuItem.Click += new System.EventHandler(this.UpdateMenuItem_Click);
             // 
             // Form1
             // 
@@ -443,6 +452,7 @@ namespace Process_Auto_Relaunch
             this.Text = "Relaunch Process";
             this.FormClosing += new System.Windows.Forms.FormClosingEventHandler(this.Form1_FormClosing);
             this.Load += new System.EventHandler(this.Form1_Load);
+            this.Shown += new System.EventHandler(this.MainWindow_Shown);
             this.groupBoxActions.ResumeLayout(false);
             this.groupBoxActions.PerformLayout();
             ((System.ComponentModel.ISupportInitialize)(this.numericUpDown1)).EndInit();
@@ -493,6 +503,7 @@ namespace Process_Auto_Relaunch
         private ToolStripMenuItem settingsToolStripMenuItem;
         private ToolStripMenuItem webhookSettingsMenuItem;
         private ToolStripMenuItem AboutProgram;
+        private ToolStripMenuItem updateMenuItem;
         private ToolTip tipProgramStartPath;
         private CheckBox checkBoxCloseFreezeProcess;
     }

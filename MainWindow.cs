@@ -10,6 +10,7 @@ using Discord;
 using Discord.Webhook;
 using RelaunchProcess;
 using RelaunchProcess.Diagnostics;
+using RelaunchProcess.Update;
 using System.Timers;
 using System.Configuration;
 
@@ -46,14 +47,17 @@ namespace Process_Auto_Relaunch
         private DateTime lastLoopErrorReported;    // когда она последний раз ушла в историю и Discord (UTC)
         private static readonly TimeSpan LoopErrorRepeatInterval = TimeSpan.FromMinutes(10);
 
+        private readonly bool startedAfterUpdate;   // запущены новой версией после обновления по кнопке
+
         /// <summary>
         /// Процесс для наблюдения
         /// </summary>
         public string ProcessName { get { return textBoxProcessName.Text; } set { textBoxProcessName.Text = value; } }
 
-        public MainWindow()
+        public MainWindow(bool afterUpdate = false, string afterUpdateNote = null)
         {
             InitializeComponent();
+            startedAfterUpdate = afterUpdate;
             if (Settings.Default.upgradeSettings)
             {
                 Debug.WriteLine("Обновление настроек.");
@@ -78,6 +82,10 @@ namespace Process_Auto_Relaunch
             string version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
             string buildDate = assembly.GetCustomAttributes<AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "BuildDate")?.Value;
             FileLog.Write($"Утилита запущена. Версия {version}, сборка от {buildDate}, x64: {Environment.Is64BitProcess}.");
+            if (afterUpdate)
+            {
+                FileLog.Write("Запуск после обновления по кнопке." + (afterUpdateNote != null ? $" Внимание: {afterUpdateNote}." : ""));
+            }
             this.updateLogDelegate = this.UpdateStatus;
             this.updateLogDelegate += this.SendDiscordMessage;
             this.updateLogDelegate += this.HistoryLog;
@@ -721,6 +729,68 @@ namespace Process_Auto_Relaunch
             AboutBox aboutBox = new AboutBox();
             aboutBox.ShowDialog(this);
             aboutBox.Dispose();
+        }
+
+        /// <summary>
+        /// Окно показано: если это первый запуск после обновления, убираем *.old и скачанные файлы.
+        /// Раньше нельзя: если новая версия упадёт до показа окна, *.old нужны для ручного отката.
+        /// </summary>
+        private void MainWindow_Shown(object sender, EventArgs e)
+        {
+            if (!startedAfterUpdate)
+            {
+                return;
+            }
+            Updater.CompleteUpdate();
+            Status($"Утилита обновлена до версии {Updater.CurrentVersion}.", NotifyLevel.logHistory);
+        }
+
+        /// <summary>
+        /// Проверка и установка обновления по кнопке. Наблюдение во время проверки и скачивания продолжается.
+        /// </summary>
+        private async void UpdateMenuItem_Click(object sender, EventArgs e)
+        {
+            Version current = Updater.CurrentVersion;
+            updateMenuItem.Enabled = false;
+            try
+            {
+                Status("Проверка обновлений...");
+                ReleaseInfo release = await Updater.GetLatestReleaseAsync();
+                if (release.Version <= current)
+                {
+                    Status($"Установлена последняя версия {current}.");
+                    MessageBox.Show(this, $"Установлена последняя версия {current}.", "Обновление",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                string notes = release.Notes.Length > 1500 ? release.Notes.Substring(0, 1500) + "\n..." : release.Notes;
+                var answer = MessageBox.Show(this,
+                    $"Доступна версия {release.Version} (установлена {current}).\n\n{notes}\n\n" +
+                    "Обновить? Утилита перезапустится, Torch при этом не перезапускается.",
+                    "Обновление", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (answer != DialogResult.Yes)
+                {
+                    Status("Обновление отменено.");
+                    return;
+                }
+
+                Status($"Скачивание версии {release.Version}...");
+                string files = await Updater.DownloadAsync(release);
+                Status($"Обновление с версии {current} до {release.Version}, перезапуск утилиты.", NotifyLevel.logHistory | NotifyLevel.logDiscord);
+                await Updater.InstallAndRestartAsync(files);
+                Close();
+            }
+            catch (Exception ex)
+            {
+                Status($"Обновление не удалось: {ex.Message}. Работает версия {current}.", NotifyLevel.logUpdateStatus | NotifyLevel.logHistory | NotifyLevel.logDiscord, ex);
+                MessageBox.Show(this, $"Обновление не удалось:\n{ex.Message}", "Обновление",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                updateMenuItem.Enabled = true;
+            }
         }
     }
 }

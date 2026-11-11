@@ -766,7 +766,7 @@ namespace Process_Auto_Relaunch
                 string notes = release.Notes.Length > 1500 ? release.Notes.Substring(0, 1500) + "\n..." : release.Notes;
                 var answer = MessageBox.Show(this,
                     $"Доступна версия {release.Version} (установлена {current}).\n\n{notes}\n\n" +
-                    "Обновить? Утилита перезапустится, Torch при этом не перезапускается.",
+                    "Обновить? Утилита перезапустится, наблюдаемый процесс при этом не перезапускается.",
                     "Обновление", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                 if (answer != DialogResult.Yes)
                 {

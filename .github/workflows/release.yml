@@ -1,0 +1,42 @@
+# Автоматический релиз: push тега vX.Y.Z собирает x64 Release и публикует zip в GitHub Releases.
+# Тег должен совпадать с AssemblyInformationalVersion в Properties/AssemblyInfo.cs.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Check tag matches version
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'.TrimStart('v')
+          $m = Select-String 'Properties/AssemblyInfo.cs' -Pattern 'AssemblyInformationalVersion\("([^"]+)"\)'
+          if (-not $m) { throw 'AssemblyInformationalVersion not found in Properties/AssemblyInfo.cs' }
+          $ver = $m.Matches[0].Groups[1].Value
+          if ($ver -ne $tag) { throw "Tag $tag does not match version $ver in Properties/AssemblyInfo.cs" }
+
+      - name: Build
+        run: msbuild "Process Auto Relaunch.csproj" -restore -p:Configuration=Release -p:Platform=x64 -p:PostBuildEvent= -verbosity:minimal
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem bin/x64/Release/* -File -Exclude *.pdb
+          if (-not ($files | Where-Object Name -eq 'Relaunch Process.exe')) { throw 'Relaunch Process.exe not found in bin/x64/Release' }
+          $files | Compress-Archive -DestinationPath "Relaunch-Process-${{ github.ref_name }}-x64.zip"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" "Relaunch-Process-${{ github.ref_name }}-x64.zip" --title "${{ github.ref_name }}" --generate-notes

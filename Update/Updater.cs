@@ -27,6 +27,7 @@ namespace RelaunchProcess.Update
         public string ZipName;
         public string ZipUrl;
         public string ShaUrl;
+        public DateTime PublishedAtUtc;
     }
 
     /// <summary>
@@ -38,6 +39,7 @@ namespace RelaunchProcess.Update
     public static class Updater
     {
         public const string AfterUpdateArgument = "--after-update";
+        public const string WatchArgument = "--watch";
         private const string LatestReleaseUrl = "https://api.github.com/repos/Dark-raven-lab/Relaunch-Process/releases/latest";
         private const string OldSuffix = ".old";
         private static readonly Regex zipNamePattern = new Regex(@"^Relaunch-Process-v[0-9.]+-x64\.zip$", RegexOptions.IgnoreCase);
@@ -118,6 +120,8 @@ namespace RelaunchProcess.Update
                 ZipName = zip?.Name,
                 ZipUrl = zip?.Url,
                 ShaUrl = sha?.Url,
+                // Newtonsoft сам разбирает ISO-дату; без даты релиз считается только что вышедшим
+                PublishedAtUtc = ((DateTime?)release["published_at"])?.ToUniversalTime() ?? DateTime.UtcNow,
             };
         }
 
@@ -220,8 +224,9 @@ namespace RelaunchProcess.Update
         /// Заменяет файлы утилиты новыми, запускает новую версию и ждёт её подтверждения.
         /// При любой ошибке возвращает старые файлы и выбрасывает исключение; текущая версия продолжает работать.
         /// После успешного возврата вызывающий должен закрыть утилиту.
+        /// resumeWatching: новая версия включит наблюдение сама (автообновление, рядом никого нет).
         /// </summary>
-        public static async Task InstallAndRestartAsync(string filesDirectory)
+        public static async Task InstallAndRestartAsync(string filesDirectory, bool resumeWatching)
         {
             var replaced = new List<ReplacedFile>();
             try
@@ -252,7 +257,7 @@ namespace RelaunchProcess.Update
                     newProcess = Process.Start(new ProcessStartInfo
                     {
                         FileName = ExePath,
-                        Arguments = $"{AfterUpdateArgument} {oldPid}",
+                        Arguments = $"{AfterUpdateArgument} {oldPid}" + (resumeWatching ? $" {WatchArgument}" : ""),
                         WorkingDirectory = AppDirectory,
                         UseShellExecute = false,
                     });

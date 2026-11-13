@@ -2,8 +2,10 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
+using System.Net.Http;
 using System.Reflection;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using RelaunchProcess.Properties;
 using Discord;
@@ -48,17 +50,27 @@ namespace Process_Auto_Relaunch
         private DateTime lastLoopErrorReported;    // когда она последний раз ушла в историю и Discord (UTC)
         private static readonly TimeSpan LoopErrorRepeatInterval = TimeSpan.FromMinutes(10);
 
-        private readonly bool startedAfterUpdate;   // запущены новой версией после обновления по кнопке
+        private readonly bool startedAfterUpdate;   // запущены новой версией после обновления
+        private readonly bool resumeWatching;       // после автообновления: включить наблюдение самим
+
+        // Автообновление: проверка раз в час, установка релиза не раньше чем через 5 часов после публикации
+        private static readonly TimeSpan AutoUpdateFirstCheck = TimeSpan.FromMinutes(5);
+        private static readonly TimeSpan AutoUpdateInterval = TimeSpan.FromHours(1);
+        private static readonly TimeSpan AutoUpdateMinReleaseAge = TimeSpan.FromHours(5);
+        private readonly System.Windows.Forms.Timer autoUpdateTimer = new System.Windows.Forms.Timer();
+        private bool updateInProgress;              // идёт ручная или автоматическая проверка/установка
+        private volatile bool safeToUpdate;         // цикл наблюдения: процесс работает, нет отсчёта и таймера зависания
 
         /// <summary>
         /// Процесс для наблюдения
         /// </summary>
         public string ProcessName { get { return textBoxProcessName.Text; } set { textBoxProcessName.Text = value; } }
 
-        public MainWindow(bool afterUpdate = false, string afterUpdateNote = null)
+        public MainWindow(bool afterUpdate = false, string afterUpdateNote = null, bool resumeWatching = false)
         {
             InitializeComponent();
             startedAfterUpdate = afterUpdate;
+            this.resumeWatching = resumeWatching;
             if (Settings.Default.upgradeSettings)
             {
                 Debug.WriteLine("Обновление настроек.");
@@ -83,7 +95,8 @@ namespace Process_Auto_Relaunch
             FileLog.Write($"Утилита запущена. Версия {Updater.CurrentVersionText}, сборка от {buildDate}, x64: {Environment.Is64BitProcess}.");
             if (afterUpdate)
             {
-                FileLog.Write("Запуск после обновления по кнопке." + (afterUpdateNote != null ? $" Внимание: {afterUpdateNote}." : ""));
+                FileLog.Write("Запуск после обновления." + (resumeWatching ? " Наблюдение будет включено." : "")
+                    + (afterUpdateNote != null ? $" Внимание: {afterUpdateNote}." : ""));
             }
             this.updateLogDelegate = this.UpdateStatus;
             this.updateLogDelegate += this.SendDiscordMessage;
@@ -102,7 +115,15 @@ namespace Process_Auto_Relaunch
         private void Form1_Load(object sender, EventArgs e)
         {
             LoadOldState();
+            if (resumeWatching)
+            {
+                radioButtonEnableWathing.Checked = true;
+            }
             CheckProgramState();
+
+            autoUpdateTimer.Tick += AutoUpdateTimer_Tick;
+            autoUpdateMenuItem.Checked = Settings.Default.autoUpdate;
+            ApplyAutoUpdateTimer();
         }
 
         /// <summary>
@@ -693,6 +714,8 @@ namespace Process_Auto_Relaunch
         /// <param name="i">Обратный отсчёт до перезапуска, сек</param>
         private void WatchIteration(ref int i)
         {
+            // Сбрасываем в начале: если итерация упадёт, старое "безопасно" не должно остаться
+            safeToUpdate = false;
             ReportTrackedExit();
             if (ProcessByNameIsRuning(ProcessName))
             {
@@ -728,6 +751,8 @@ namespace Process_Auto_Relaunch
                 processInformationLabel.Text = $"Интерфейс: {ProcessAnswer}. ЦПУ: {cpuPercent:f2}% {cpuTotalTime:f2}мсек";
                 if (i < (int)numericUpDown1.Value) Status($"Процесс {ProcessName} запущен.", NotifyLevel.logDiscord);
                 i = (int)numericUpDown1.Value;
+                // Таймер зависания живёт и пока снимается дамп и завершается процесс, так что это тоже исключено
+                safeToUpdate = !TimerResponceRuning();
             }
             else
             {
@@ -793,55 +818,140 @@ namespace Process_Auto_Relaunch
                 return;
             }
             Updater.CompleteUpdate();
-            Status($"Утилита обновлена до версии {Updater.CurrentVersion}.", NotifyLevel.logHistory);
+            Status($"Утилита обновлена до версии {Updater.CurrentVersionText}.", NotifyLevel.logHistory | NotifyLevel.logDiscord);
+        }
+
+        private async void CheckNowMenuItem_Click(object sender, EventArgs e)
+        {
+            await RunUpdateAsync(automatic: false);
+        }
+
+        private void AutoUpdateMenuItem_CheckedChanged(object sender, EventArgs e)
+        {
+            // При загрузке галочка ставится из настроек: тогда только включаем таймер, без записи в лог
+            if (autoUpdateMenuItem.Checked != Settings.Default.autoUpdate)
+            {
+                Settings.Default.autoUpdate = autoUpdateMenuItem.Checked;
+                Settings.Default.Save();
+                Status(autoUpdateMenuItem.Checked ? "Автообновление включено." : "Автообновление выключено.", NotifyLevel.logHistory);
+            }
+            ApplyAutoUpdateTimer();
+        }
+
+        private void ApplyAutoUpdateTimer()
+        {
+            autoUpdateTimer.Stop();
+            if (autoUpdateMenuItem.Checked)
+            {
+                autoUpdateTimer.Interval = (int)AutoUpdateFirstCheck.TotalMilliseconds;
+                autoUpdateTimer.Start();
+            }
+        }
+
+        private async void AutoUpdateTimer_Tick(object sender, EventArgs e)
+        {
+            autoUpdateTimer.Interval = (int)AutoUpdateInterval.TotalMilliseconds;
+            await RunUpdateAsync(automatic: true);
         }
 
         /// <summary>
-        /// Проверка и установка обновления по кнопке. Наблюдение во время проверки и скачивания продолжается.
+        /// Можно ли автоматически перезапустить утилиту прямо сейчас.
+        /// Не во время отсчёта до перезапуска, зависания процесса и не при открытом окне настроек.
         /// </summary>
-        private async void UpdateMenuItem_Click(object sender, EventArgs e)
+        private bool IsSafeToUpdate()
         {
+            if (Application.OpenForms.Count > 1)
+            {
+                return false;
+            }
+            return !myBackgroundWorker.IsBusy || safeToUpdate;
+        }
+
+        /// <summary>
+        /// Проверка и установка обновления. Наблюдение во время проверки и скачивания продолжается.
+        /// Вручную: с вопросами и окнами. Автоматически: без окон, только релиз старше 5 часов
+        /// и только в безопасный момент; иначе ждём следующей проверки через час.
+        /// </summary>
+        private async Task RunUpdateAsync(bool automatic)
+        {
+            if (updateInProgress)
+            {
+                return;
+            }
+            updateInProgress = true;
+            checkNowMenuItem.Enabled = false;
             Version current = Updater.CurrentVersion;
-            updateMenuItem.Enabled = false;
+            string action = automatic ? "Автообновление" : "Обновление";
             try
             {
-                Status("Проверка обновлений...");
+                if (!automatic)
+                {
+                    Status("Проверка обновлений...");
+                }
                 ReleaseInfo release = await Updater.GetLatestReleaseAsync();
                 if (release.Version <= current)
                 {
-                    string upToDate = $"Установлена последняя версия {current}.";
-                    Status(upToDate);
-                    MessageBox.Show(this, upToDate, "Обновление",
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    if (!automatic)
+                    {
+                        string upToDate = $"Установлена последняя версия {current}.";
+                        Status(upToDate);
+                        MessageBox.Show(this, upToDate, "Обновление", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
                     return;
                 }
 
-                string notes = release.Notes.Length > 1500 ? release.Notes.Substring(0, 1500) + "\n..." : release.Notes;
-                var answer = MessageBox.Show(this,
-                    $"Доступна версия {release.Version} (установлена {current}).\n\n{notes}\n\n" +
-                    "Обновить? Утилита перезапустится, наблюдаемый процесс при этом не перезапускается.",
-                    "Обновление", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-                if (answer != DialogResult.Yes)
+                if (automatic)
                 {
-                    Status("Обновление отменено.");
-                    return;
+                    DateTime installAfter = release.PublishedAtUtc + AutoUpdateMinReleaseAge;
+                    if (DateTime.UtcNow < installAfter)
+                    {
+                        FileLog.Write($"Автообновление: найдена версия {release.Version}, установка не раньше {installAfter.ToLocalTime():dd.MM.yyyy HH:mm}.");
+                        return;
+                    }
+                    if (!IsSafeToUpdate())
+                    {
+                        FileLog.Write($"Автообновление до {release.Version} отложено до следующей проверки: процесс не запущен, перезапускается или не отвечает, либо открыто окно утилиты.");
+                        return;
+                    }
+                }
+                else
+                {
+                    string notes = release.Notes.Length > 1500 ? release.Notes.Substring(0, 1500) + "\n..." : release.Notes;
+                    var answer = MessageBox.Show(this,
+                        $"Доступна версия {release.Version} (установлена {current}).\n\n{notes}\n\n" +
+                        "Обновить? Утилита перезапустится, наблюдаемый процесс при этом не перезапускается.",
+                        "Обновление", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                    if (answer != DialogResult.Yes)
+                    {
+                        Status("Обновление отменено.");
+                        return;
+                    }
                 }
 
                 Status($"Скачивание версии {release.Version}...");
                 string files = await Updater.DownloadAsync(release);
-                Status($"Обновление с версии {current} до {release.Version}, перезапуск утилиты.", NotifyLevel.logHistory | NotifyLevel.logDiscord);
-                await Updater.InstallAndRestartAsync(files);
+                Status($"{action} с версии {current} до {release.Version}, перезапуск утилиты.", NotifyLevel.logHistory | NotifyLevel.logDiscord);
+                // После автообновления рядом никого нет: наблюдение новая версия включит сама
+                await Updater.InstallAndRestartAsync(files, resumeWatching: automatic && myBackgroundWorker.IsBusy);
                 Close();
+            }
+            catch (Exception ex) when (automatic && (ex is HttpRequestException || ex is TaskCanceledException))
+            {
+                // Нет сети или GitHub не ответил: не шумим в Discord, через час попробуем снова
+                FileLog.Write($"Автообновление: GitHub недоступен: {ex.Message}");
             }
             catch (Exception ex)
             {
-                Status($"Обновление не удалось: {ex.Message}. Работает версия {current}.", NotifyLevel.logUpdateStatus | NotifyLevel.logHistory | NotifyLevel.logDiscord, ex);
-                MessageBox.Show(this, $"Обновление не удалось:\n{ex.Message}", "Обновление",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Status($"{action} не удалось: {ex.Message}. Работает версия {current}.", NotifyLevel.logUpdateStatus | NotifyLevel.logHistory | NotifyLevel.logDiscord, ex);
+                if (!automatic)
+                {
+                    MessageBox.Show(this, $"Обновление не удалось:\n{ex.Message}", "Обновление", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
             finally
             {
-                updateMenuItem.Enabled = true;
+                updateInProgress = false;
+                checkNowMenuItem.Enabled = true;
             }
         }
     }

@@ -9,13 +9,15 @@ namespace RelaunchProcess
     {
         /// <summary>
         /// Главная точка входа для приложения.
+        /// Аргументы после обновления: --after-update &lt;PID старой версии&gt; [--watch]
         /// </summary>
         [STAThread]
         static int Main(string[] args)
         {
             bool afterUpdate = false;
             string afterUpdateNote = null;
-            if (args.Length == 2 && args[0] == Updater.AfterUpdateArgument && int.TryParse(args[1], out int oldPid))
+            int index = Array.IndexOf(args, Updater.AfterUpdateArgument);
+            if (index >= 0 && index + 1 < args.Length && int.TryParse(args[index + 1], out int oldPid))
             {
                 // До создания окна: старая версия должна сохранить настройки и завершиться
                 if (!Updater.ConfirmStart(oldPid, out afterUpdateNote))
@@ -24,10 +26,11 @@ namespace RelaunchProcess
                 }
                 afterUpdate = true;
             }
+            bool resumeWatching = afterUpdate && Array.IndexOf(args, Updater.WatchArgument) >= 0;
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new MainWindow(afterUpdate, afterUpdateNote));
+            Application.Run(new MainWindow(afterUpdate, afterUpdateNote, resumeWatching));
             return 0;
         }
     }

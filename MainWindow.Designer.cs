@@ -61,6 +61,8 @@ namespace Process_Auto_Relaunch
             this.webhookSettingsMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.AboutProgram = new System.Windows.Forms.ToolStripMenuItem();
             this.updateMenuItem = new System.Windows.Forms.ToolStripMenuItem();
+            this.autoUpdateMenuItem = new System.Windows.Forms.ToolStripMenuItem();
+            this.checkNowMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.tipProgramStartPath = new System.Windows.Forms.ToolTip(this.components);
             this.groupBoxActions.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)(this.numericUpDown1)).BeginInit();
@@ -422,10 +424,27 @@ namespace Process_Auto_Relaunch
             //
             // updateMenuItem
             //
+            this.updateMenuItem.DropDownItems.AddRange(new System.Windows.Forms.ToolStripItem[] {
+            this.autoUpdateMenuItem,
+            this.checkNowMenuItem});
             this.updateMenuItem.Name = "updateMenuItem";
             this.updateMenuItem.Size = new System.Drawing.Size(92, 20);
             this.updateMenuItem.Text = "Обновление";
-            this.updateMenuItem.Click += new System.EventHandler(this.UpdateMenuItem_Click);
+            //
+            // autoUpdateMenuItem
+            //
+            this.autoUpdateMenuItem.CheckOnClick = true;
+            this.autoUpdateMenuItem.Name = "autoUpdateMenuItem";
+            this.autoUpdateMenuItem.Size = new System.Drawing.Size(190, 22);
+            this.autoUpdateMenuItem.Text = "Автоматически";
+            this.autoUpdateMenuItem.CheckedChanged += new System.EventHandler(this.AutoUpdateMenuItem_CheckedChanged);
+            //
+            // checkNowMenuItem
+            //
+            this.checkNowMenuItem.Name = "checkNowMenuItem";
+            this.checkNowMenuItem.Size = new System.Drawing.Size(190, 22);
+            this.checkNowMenuItem.Text = "Проверить сейчас";
+            this.checkNowMenuItem.Click += new System.EventHandler(this.CheckNowMenuItem_Click);
             // 
             // Form1
             // 
@@ -504,6 +523,8 @@ namespace Process_Auto_Relaunch
         private ToolStripMenuItem webhookSettingsMenuItem;
         private ToolStripMenuItem AboutProgram;
         private ToolStripMenuItem updateMenuItem;
+        private ToolStripMenuItem autoUpdateMenuItem;
+        private ToolStripMenuItem checkNowMenuItem;
         private ToolTip tipProgramStartPath;
         private CheckBox checkBoxCloseFreezeProcess;
     }

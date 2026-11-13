@@ -40,6 +40,7 @@ namespace Process_Auto_Relaunch
         private readonly object exitTrackLock = new object();
         private Process exitTrackedProcess;     // процесс с открытым хендлом: без него код выхода после завершения не прочитать
         private int exitTrackFailedPid;         // PID, хендл которого открыть не удалось: повторно не пытаемся
+        private volatile int killedByUsPid;     // PID, снятый самой утилитой как зависший: его код -1 ожидаем
 
         private const int MaxHistoryLines = 100;   // строк в окне истории; файл лога не ограничен
         private int cpuLastPid;                    // PID, для которого накоплен cpuLastTime
@@ -414,19 +415,70 @@ namespace Process_Auto_Relaunch
             // ExitTime ненадёжен (бывает нулевым), поэтому пишем время обнаружения: цикл проверяет раз в секунду.
             // Исключение здесь остановило бы весь цикл наблюдения, поэтому оно перехватывается.
             string codeText;
+            int? exitCode = null;
             try
             {
-                int code = process.ExitCode;
-                codeText = $"с кодом {code} (0x{code:X8})";
+                exitCode = process.ExitCode;
+                codeText = $"с кодом {exitCode} (0x{exitCode:X8})";
             }
             catch (Exception ex)
             {
                 codeText = $"(код выхода прочитать не удалось: {ex.Message})";
             }
-            Status($"Процесс {ProcessName} (PID {process.Id}) завершился {codeText}, обнаружено в {DateTime.Now:HH:mm:ss}.", NotifyLevel.logHistory | NotifyLevel.logDiscord);
+            string text = $"Процесс {ProcessName} (PID {process.Id}) завершился {codeText}, обнаружено в {DateTime.Now:HH:mm:ss}.";
+
+            if (exitCode == -1)
+            {
+                if (process.Id == killedByUsPid)
+                {
+                    // Сами сняли зависший процесс в ProcessKill: код -1 ожидаем, но пишем, как и остальные шаги снятия
+                    Status(text + " Процесс снят утилитой.", NotifyLevel.logHistory | NotifyLevel.logDiscord);
+                }
+                else if (OtherProcessRunning(process.Id))
+                {
+                    // Плановый рестарт: процесс запускает свою новую копию и снимает себя через Kill.
+                    // Это происходит несколько раз в сутки, поэтому только в файл лога.
+                    FileLog.Write(text + " Новая копия уже запущена - плановый перезапуск.");
+                }
+                else
+                {
+                    Status(text + " Новой копии нет: процесс снят извне (Kill/TerminateProcess), а не перезапущен.", NotifyLevel.logHistory | NotifyLevel.logDiscord);
+                }
+            }
+            else
+            {
+                Status(text, NotifyLevel.logHistory | NotifyLevel.logDiscord);
+            }
             // Хендл закрываем сразу: пока он открыт, завершённый процесс виден в списке процессов
             Interlocked.CompareExchange(ref WatchedProcess, null, process);
             process.Dispose();
+        }
+
+        /// <summary>
+        /// Есть ли в нашей сессии другой живой процесс с тем же именем (новая копия после планового перезапуска)
+        /// </summary>
+        private bool OtherProcessRunning(int exitedPid)
+        {
+            int sessionId = Process.GetCurrentProcess().SessionId;
+            bool found = false;
+            foreach (var process in Process.GetProcessesByName(ProcessName))
+            {
+                using (process)
+                {
+                    try
+                    {
+                        if (process.Id != exitedPid && process.SessionId == sessionId && process.Threads.Count > 0)
+                        {
+                            found = true;
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        // процесс успел завершиться между снимком и проверкой - не считаем его
+                    }
+                }
+            }
+            return found;
         }
 
         /// <summary>
@@ -578,6 +630,7 @@ namespace Process_Auto_Relaunch
             try
             {
                 Status($"Попытка завершения процесса {process.ProcessName}", NotifyLevel.logHistory | NotifyLevel.logDiscord);
+                killedByUsPid = process.Id;
                 process.Kill();
             }
             catch (Exception ex)

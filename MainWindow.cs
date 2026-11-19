@@ -89,7 +89,8 @@ namespace Process_Auto_Relaunch
                     Settings.Default.Save();
                 }
             }
-            FileLog.ProcessName = ProcessName;
+            // Из настроек, а не из поля: поле заполнено ещё до Upgrade(), и после смены версии оно пока пустое
+            FileLog.ProcessName = Settings.Default.processName;
             textBoxProcessName.TextChanged += (s, e) => FileLog.ProcessName = ProcessName;
             string buildDate = typeof(MainWindow).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "BuildDate")?.Value;
             FileLog.Write($"Утилита запущена. Версия {Updater.CurrentVersionText}, сборка от {buildDate}, x64: {Environment.Is64BitProcess}.");
@@ -364,9 +365,9 @@ namespace Process_Auto_Relaunch
             foreach (var process in processes)
             {
                 Debug.WriteLine($"Found proces: {process.ProcessName}. Session Id: {process.SessionId}. Current Session Id: {sessionid}");
-                // Завершённый процесс остаётся в списке, пока кто-то держит его хендл (в т.ч. мы сами ради кода выхода).
-                // У такого процесса нет потоков: считаем его не запущенным, иначе перезапуск не случится.
-                if (found == null && process.SessionId == sessionid && process.Threads.Count > 0)
+                // Завершённый процесс остаётся в списке, пока кто-то держит его хендл (в т.ч. мы сами ради кода выхода):
+                // считаем его не запущенным, иначе перезапуск не случится.
+                if (found == null && process.SessionId == sessionid && IsAlive(process))
                 {
                     found = process;
                 }
@@ -387,6 +388,23 @@ namespace Process_Auto_Relaunch
         }
 
         /// <summary>
+        /// Жив ли процесс из списка. Число потоков берётся из снимка и у только что завершившегося процесса
+        /// бывает ещё ненулевым (так было при плановых перезапусках), поэтому сначала спрашиваем сам процесс.
+        /// </summary>
+        private static bool IsAlive(Process process)
+        {
+            try
+            {
+                return !process.HasExited;
+            }
+            catch (Exception)
+            {
+                // Нет прав открыть процесс: остаётся судить по снимку
+                return process.Threads.Count > 0;
+            }
+        }
+
+        /// <summary>
         /// Начинает следить за завершением процесса. Хендл открывается, пока процесс жив,
         /// иначе после выхода код завершения уже не прочитать.
         /// </summary>
@@ -403,6 +421,12 @@ namespace Process_Auto_Relaunch
                 {
                     _ = process.Handle;
                     exitTrackedProcess = process;
+                    return;
+                }
+                catch (InvalidOperationException)
+                {
+                    // Процесс успел завершиться между проверкой и открытием: это не ошибка прав,
+                    // в следующую секунду его уже не будет в списке
                     return;
                 }
                 catch (Exception ex)
@@ -488,7 +512,7 @@ namespace Process_Auto_Relaunch
                 {
                     try
                     {
-                        if (process.Id != exitedPid && process.SessionId == sessionId && process.Threads.Count > 0)
+                        if (process.Id != exitedPid && process.SessionId == sessionId && IsAlive(process))
                         {
                             found = true;
                         }
